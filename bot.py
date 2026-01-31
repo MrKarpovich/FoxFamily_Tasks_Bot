@@ -1,69 +1,89 @@
 """
-🦊 FoxFamilyTask Bot — Семейный менеджер задач с прогресс-барами и напоминаниями
-Адаптировано из E-Sys FoxData под aiogram 3.22.0 + PyQt6 6.10.0
+🦊 FoxFamilyTask Bot — Семейный менеджер задач
+aiogram 3.22.0 + PyQt6 6.10.0
+Полная версия с GUI, FSM, напоминаниями и защитой от ошибок
+Эта часть содержит импорты, настройку логирования, константы, FSM состояния и утилиты для БД
 """
 
-import asyncio
-import json
-import logging
-import secrets
-import sys
-import time
-import uuid
-from datetime import datetime, timedelta
-from pathlib import Path
-from typing import Any, Dict, List, Optional
+# ────────────────────────────────────────────────
+# Импорты стандартных библиотек Python
+# ────────────────────────────────────────────────
+import asyncio  # Для асинхронного программирования, необходим для aiogram
+import json  # Для работы с JSON-файлами (БД бота)
+import logging  # Для логирования событий, ошибок и информации
+import secrets  # Для генерации крипто-стойких ключей приглашения
+import sys  # Для выхода из приложения и доступа к аргументам
+import time  # Для работы с временными метками (ключи, дедлайны)
+import uuid  # Для генерации уникальных ID семей и задач
+from datetime import datetime, timedelta  # Для дат, времени и дельт (напоминания, дедлайны)
+from pathlib import Path  # Для работы с путями файлов (БД, папки)
+from typing import Any, Dict, Optional  # Для аннотаций типов (читаемость кода)
 
-# PyQt6 imports (version 6.10.0)
-from PyQt6.QtCore import QObject, QThread, pyqtSignal
-from PyQt6.QtGui import QFont
+# ────────────────────────────────────────────────
+# Импорты PyQt6 (версия 6.10.0)
+# ────────────────────────────────────────────────
+from PyQt6.QtCore import QObject, QThread, pyqtSignal  # Для потоков и сигналов (запуск бота в фоне)
+from PyQt6.QtGui import QFont  # Для шрифтов в GUI
 from PyQt6.QtWidgets import (
-    QApplication,
-    QFileDialog,
-    QLabel,
-    QLineEdit,
-    QMessageBox,
-    QPushButton,
-    QStackedWidget,
-    QVBoxLayout,
-    QWidget,
-    QMainWindow,
+    QApplication,  # Основное приложение Qt
+    QFileDialog,  # Диалог выбора файлов/папок
+    QLabel,  # Метки для текста в GUI
+    QLineEdit,  # Поле ввода текста
+    QMessageBox,  # Диалоги сообщений/ошибок
+    QPushButton,  # Кнопки
+    QStackedWidget,  # Стек виджетов для wizard
+    QVBoxLayout,  # Вертикальный макет
+    QWidget,  # Базовый виджет
+    QMainWindow,  # Основное окно
 )
 
-# aiogram imports (version 3.22.0)
-from aiogram import Bot, Dispatcher, F
-from aiogram.enums import ParseMode
-from aiogram.filters import Command
-from aiogram.fsm.context import FSMContext
-from aiogram.fsm.state import State, StatesGroup
-from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.types import CallbackQuery, KeyboardButton, Message, ReplyKeyboardMarkup
-from aiogram.utils.keyboard import InlineKeyboardBuilder
+# ────────────────────────────────────────────────
+# Импорты aiogram (версия 3.22.0)
+# ────────────────────────────────────────────────
+from aiogram import Bot, Dispatcher, F  # Бот, диспетчер, фильтры
+from aiogram.enums import ParseMode  # Парсинг HTML
+from aiogram.filters import Command  # Фильтр команд
+from aiogram.fsm.context import FSMContext  # Контекст состояний
+from aiogram.fsm.state import State, StatesGroup  # Состояния FSM
+from aiogram.fsm.storage.memory import MemoryStorage  # Хранение состояний в памяти
+from aiogram.types import CallbackQuery, KeyboardButton, Message, ReplyKeyboardMarkup  # Типы сообщений, кнопок
+from aiogram.utils.keyboard import InlineKeyboardBuilder  # Построитель inline-кнопок
 
-# Logging setup
-LOG_FILE = "foxfamily.log"
+# ────────────────────────────────────────────────
+# Настройка логирования
+# ────────────────────────────────────────────────
+LOG_FILE = "foxfamily.log"  # Файл логов
 logging.basicConfig(
-    level=logging.INFO,
-    filename=LOG_FILE,
-    filemode="a",
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    encoding="utf-8",
+    level=logging.INFO,  # Уровень логирования (INFO и выше)
+    filename=LOG_FILE,  # Файл для записи
+    filemode="a",  # Добавление в конец файла
+    format="%(asctime)s [%(levelname)s] %(message)s",  # Формат лога
+    encoding="utf-8",  # Кодировка
 )
+
 
 def log_info(msg: str) -> None:
+    """Функция для вывода информации в лог и консоль."""
     logging.info(msg)
     print(msg)
 
+
 def log_error(msg: str) -> None:
+    """Функция для вывода ошибок в лог и консоль."""
     logging.error(msg)
     print(f"ERROR: {msg}")
 
-# Constants
-DB_PATH = Path("foxfamily_db.json")
-KEY_LENGTH_BYTES = 48  # ~64 символа с secrets.token_urlsafe
-KEY_EXPIRY_SEC = 600  # 10 минут
-MAX_FREE_MEMBERS = 25
-WARN_MEMBERS_THRESHOLD = 20
+
+# ────────────────────────────────────────────────
+# Константы бота
+# ────────────────────────────────────────────────
+DB_PATH = Path("foxfamily_db.json")  # Путь к файлу БД
+KEY_LENGTH_BYTES = 48  # Длина ключа в байтах для secrets.token_urlsafe (~64 символа)
+KEY_EXPIRY_SEC = 600  # Время жизни ключа в секундах (10 минут)
+MAX_FREE_MEMBERS = 25  # Максимум участников в семье бесплатно
+WARN_MEMBERS_THRESHOLD = 20  # Порог для предупреждения о приближении к лимиту
+
+# Опции напоминаний (ключ: название, значение: секунды)
 REMINDER_OPTIONS = {
     "Без напоминаний": 0,
     "За 1 день": 86400,
@@ -73,91 +93,182 @@ REMINDER_OPTIONS = {
     "За 10 минут": 600,
 }
 
-# FSM States
-class FamilyStates(StatesGroup):
-    join_key = State()
-    join_nick = State()
-    change_name = State()
-    create_task_type = State()
-    create_task_desc = State()
-    create_task_deadline_date = State()
-    create_task_deadline_time = State()
-    create_task_time_confirm = State()
-    create_task_reminder = State()
-    create_task_items = State()  # Для типа "Покупки"
-    task_progress = State()
 
-# DB utils
+# ────────────────────────────────────────────────
+# FSM состояния
+# ────────────────────────────────────────────────
+class FamilyStates(StatesGroup):
+    """Класс для состояний FSM (Finite State Machine)."""
+    join_key = State()  # Состояние ввода ключа для присоединения к семье
+    join_nick = State()  # Состояние ввода ника для присоединения
+    change_name = State()  # Состояние изменения имени семьи
+    create_task_type = State()  # Состояние выбора типа задачи
+    create_task_desc = State()  # Состояние ввода описания задачи
+    create_task_date = State()  # Состояние ввода даты дедлайна
+    create_task_time = State()  # Состояние ввода времени дедлайна
+    create_task_time_confirm = State()  # Состояние подтверждения времени
+    create_task_confirm_datetime = State()  # Состояние финального подтверждения даты и времени
+    create_task_reminder = State()  # Состояние выбора напоминания
+    create_task_items = State()  # Состояние ввода списка для покупок
+    task_progress = State()  # Состояние обновления прогресса задачи
+
+
+# ────────────────────────────────────────────────
+# Утилиты для БД
+# ────────────────────────────────────────────────
+
 def load_db() -> Dict[str, Any]:
+    """Загружает данные из JSON-файла БД.
+
+    Если файл не существует или повреждён, возвращает шаблонную структуру БД.
+    Шаблон включает токен, семьи и пользователей.
+
+    Возвращает:
+        Dict[str, Any]: Словарь с данными БД.
+
+    Пример использования:
+        db = load_db()
+        families = db['families']
+    """
     if DB_PATH.exists():
         try:
             with open(DB_PATH, "r", encoding="utf-8") as f:
-                return json.load(f)
+                data = json.load(f)
+                # Проверка на наличие ключевых полей
+                if 'families' not in data:
+                    data['families'] = {}
+                if 'users' not in data:
+                    data['users'] = {}
+                return data
         except Exception as e:
-            log_error(f"Failed to load DB: {e}")
-            return {}
-    return {
-        "telegram_token": "",
-        "families": {},
-        "users": {},
-    }
+            log_error(f"Load DB error: {e}")
+            return {"telegram_token": "", "families": {}, "users": {}}
+    return {"telegram_token": "", "families": {}, "users": {}}
+
 
 def atomic_save_json(data: Dict[str, Any], path: Path = DB_PATH) -> None:
-    temp_path = path.with_suffix(".tmp")
-    try:
-        with open(temp_path, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2, ensure_ascii=False)
-        temp_path.replace(path)
-    except Exception as e:
-        log_error(f"Failed to save DB: {e}")
+    """Атомарно сохраняет данные в JSON-файл.
 
-# Key generation and validation
-def generate_family_key() -> Dict[str, float | str]:
-    key = secrets.token_urlsafe(KEY_LENGTH_BYTES)
-    now = time.time()
+    Сначала пишет в временный файл .tmp, затем заменяет основной, чтобы избежать повреждений при сбое.
+
+    Аргументы:
+        data (Dict[str, Any]): Данные для сохранения.
+        path (Path): Путь к файлу (по умолчанию DB_PATH).
+
+    Пример использования:
+        db = load_db()
+        db['families']['new'] = {}
+        atomic_save_json(db)
+    """
+    temp = path.with_suffix(".tmp")
+    try:
+        with open(temp, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+        temp.replace(path)
+    except Exception as e:
+        log_error(f"Save DB error: {e}")
+
+
+### Часть 2: Утилиты для ключей, прогресса, уведомлений и напоминаний
+
+# ────────────────────────────────────────────────
+# Утилиты для ключей
+# ────────────────────────────────────────────────
+
+def generate_family_key() -> Dict[str, Any]:
+    """Генерирует крипто-стойкий ключ приглашения.
+
+    Использует secrets.token_urlsafe для безопасной генерации.
+
+    Возвращает:
+        Dict[str, Any]: Словарь с ключом, временем создания и истечения.
+
+    Пример возврата:
+        {
+            "value": "long_random_string",
+            "created": 1706634251.123,
+            "expires": 1706634851.123
+        }
+    """
     return {
-        "value": key,
-        "created": now,
-        "expires": now + KEY_EXPIRY_SEC,
+        "value": secrets.token_urlsafe(KEY_LENGTH_BYTES),
+        "created": time.time(),
+        "expires": time.time() + KEY_EXPIRY_SEC,
     }
 
-def is_key_valid(key_input: str, family: Dict[str, Any]) -> bool:
-    key_data = family.get("active_key")
-    if not key_data:
-        return False
-    now = time.time()
-    if now > key_data["expires"]:
-        family["active_key"] = None
-        return False
-    return key_input.strip() == key_data["value"]
 
-# Helpers
+def is_key_valid(key_input: str, family: Dict[str, Any]) -> bool:
+    """Проверяет валидность ключа приглашения.
+
+    Если ключ истёк, удаляет его из семьи и сохраняет БД.
+
+    Аргументы:
+        key_input (str): Введённый ключ.
+        family (Dict[str, Any]): Данные семьи из БД.
+
+    Возвращает:
+        bool: True, если ключ валиден, False иначе.
+    """
+    kd = family.get("active_key")
+    if not kd:
+        return False
+    if time.time() > kd["expires"]:
+        family["active_key"] = None
+        atomic_save_json(load_db())
+        return False
+    return key_input.strip() == kd["value"]
+
+
+# ────────────────────────────────────────────────
+# Утилиты
+# ────────────────────────────────────────────────
+
 def progress_bar(pct: int) -> str:
-    filled = int(pct // 10)
+    """Генерирует строку прогресс-бара.
+
+    Использует символы ■ и □ для заполненной и пустой части.
+
+    Аргументы:
+        pct (int): Процент прогресса (0-100).
+
+    Возвращает:
+        str: Строка бара, например "■■■■■■□□□□" для 60%.
+
+    Пример:
+        print(progress_bar(75))  # ■■■■■■■■□□
+    """
+    filled = pct // 10
     return "■" * filled + "□" * (10 - filled)
 
-async def notify_family(
-    bot: Bot,
-    family_id: str,
-    text: str,
-    reply_markup: Optional[ReplyKeyboardMarkup] = None,
-) -> None:
-    db = load_db()
-    family = db["families"].get(family_id, {})
-    for uid_str in family.get("members", {}):
-        try:
-            await bot.send_message(
-                int(uid_str),
-                text,
-                reply_markup=reply_markup,
-                parse_mode=ParseMode.HTML,
-            )
-            await asyncio.sleep(0.1)  # Anti-flood
-        except Exception as e:
-            log_error(f"Notify failed for {uid_str}: {e}")
 
-# Reminders loop
-async def reminders_loop(bot: Bot) -> None:
+async def notify_family(bot: Bot, fam_id: str, text: str, markup=None) -> None:
+    """Отправляет уведомление всем членам семьи.
+
+    С задержкой 0.1 сек между сообщениями для защиты от флуда Telegram.
+
+    Аргументы:
+        bot (Bot): Экземпляр бота.
+        fam_id (str): ID семьи.
+        text (str): Текст уведомления.
+        markup (Optional[ReplyKeyboardMarkup]): Клавиатура (опционально).
+    """
+    db = load_db()
+    fam = db["families"].get(fam_id, {})
+    for uid_str in fam.get("members", {}):
+        try:
+            await bot.send_message(int(uid_str), text, reply_markup=markup, parse_mode=ParseMode.HTML)
+            await asyncio.sleep(0.1)
+        except Exception as e:
+            log_error(f"Notify error for {uid_str}: {e}")
+
+
+async def reminders_loop(bot: Bot):
+    """Фоновый цикл для отправки напоминаний о задачах.
+
+    Проверяет каждые 60 секунд все задачи во всех семьях.
+    Если дедлайн близко — отправляет уведомление и отмечает 'reminder_sent'.
+    Сохраняет БД только если были изменения.
+    """
     while True:
         await asyncio.sleep(60)
         db = load_db()
@@ -167,22 +278,40 @@ async def reminders_loop(bot: Bot) -> None:
             for task_id, task in fam.get("tasks", {}).items():
                 if "reminder_sent" in task:
                     continue
-                if "reminder_sec" in task and task["reminder_sec"] > 0:
-                    if "deadline" in task:
-                        try:
-                            dl_time = time.mktime(datetime.strptime(task["deadline"], "%d.%m.%Y %H:%M").timetuple())
-                            if dl_time - now <= task["reminder_sec"]:
-                                text = f"🔔 Напоминание: задача '{task['desc']}' скоро истекает!"
-                                await notify_family(bot, fam_id, text)
-                                task["reminder_sent"] = True
-                                updated = True
-                        except ValueError:
-                            log_error(f"Invalid deadline in task {task_id}")
+                rs = task.get("reminder_sec", 0)
+                if rs <= 0 or "deadline" not in task:
+                    continue
+                try:
+                    dl = datetime.strptime(task["deadline"], "%d.%m.%Y %H:%M")
+                    if dl.timestamp() - now <= rs:
+                        text = f"🦊 Напоминание: задача «{task['desc']}» скоро нужно выполнить."
+                        await notify_family(bot, fam_id, text)
+                        task["reminder_sent"] = True
+                        updated = True
+                except Exception as e:
+                    log_error(f"Reminder error for task {task_id}: {e}")
         if updated:
             atomic_save_json(db)
 
-# GUI
+
+# ────────────────────────────────────────────────
+# GUI (полный wizard как в оригинале)
+# ────────────────────────────────────────────────
+
 class MainWindow(QMainWindow):
+    """Основное окно GUI для настройки бота.
+
+    Использует QStackedWidget для шагов настройки (wizard).
+
+    Шаги:
+        1. Папка данных
+        2. База данных
+        3. Папка временных файлов
+        4. Токен и запуск бота
+
+    После настройки запускает BotThread.
+    """
+
     def __init__(self):
         super().__init__()
         self.setWindowTitle("🦊 FoxFamilyTask Bot — Настройка")
@@ -200,8 +329,10 @@ class MainWindow(QMainWindow):
         self.stacked.addWidget(self.page2)
         self.stacked.addWidget(self.page3)
         self.stacked.addWidget(self.page4)
+        self.stacked.setCurrentIndex(0)
 
     def create_page1(self) -> QWidget:
+        """Создаёт первую страницу: выбор папки данных."""
         w = QWidget()
         lay = QVBoxLayout(w)
         lay.addWidget(QLabel("Шаг 1: Папка для данных (db, логи)", font=QFont("Arial", 11)))
@@ -217,11 +348,13 @@ class MainWindow(QMainWindow):
         return w
 
     def browse_data(self) -> None:
+        """Диалог выбора папки данных."""
         folder = QFileDialog.getExistingDirectory(self, "Выберите папку данных")
         if folder:
             self.data_edit.setText(folder)
 
     def to_page2(self) -> None:
+        """Переход ко второй странице после проверки."""
         path = self.data_edit.text().strip()
         if not path or not Path(path).is_dir():
             QMessageBox.critical(self, "Ошибка", "Укажите корректную папку!")
@@ -231,6 +364,7 @@ class MainWindow(QMainWindow):
         self.stacked.setCurrentIndex(1)
 
     def create_page2(self) -> QWidget:
+        """Создаёт вторую страницу: информация о БД."""
         w = QWidget()
         lay = QVBoxLayout(w)
         lay.addWidget(QLabel("Шаг 2: База данных (foxfamily_db.json)", font=QFont("Arial", 11)))
@@ -238,18 +372,16 @@ class MainWindow(QMainWindow):
         back_btn = QPushButton("← Назад")
         back_btn.clicked.connect(lambda: self.stacked.setCurrentIndex(0))
         next_btn = QPushButton("Далее →")
-        next_btn.clicked.connect(self.to_page3)
+        next_btn.clicked.connect(lambda: self.stacked.setCurrentIndex(2))
         lay.addWidget(back_btn)
         lay.addWidget(next_btn)
         return w
 
-    def to_page3(self) -> None:
-        self.stacked.setCurrentIndex(2)
-
     def create_page3(self) -> QWidget:
+        """Создаёт третью страницу: папка временных файлов."""
         w = QWidget()
         lay = QVBoxLayout(w)
-        lay.addWidget(QLabel("Шаг 3: Папка для временных файлов (output_base)", font=QFont("Arial", 11)))
+        lay.addWidget(QLabel("Шаг 3: Папка для временных файлов (опционально)", font=QFont("Arial", 11)))
         self.output_edit = QLineEdit(self.db.get("output_base", ""))
         browse_btn = QPushButton("Выбрать папку...")
         browse_btn.clicked.connect(self.browse_output)
@@ -310,13 +442,17 @@ class MainWindow(QMainWindow):
         self.bot_thread = BotThread(token)
         self.bot_thread.status_updated.connect(self.update_status)
         self.bot_thread.start()
-        self.status_label.setText("Статус: бот запущен...")
-        log_info("Бот запущен из GUI")
+        self.status_label.setText("Статус: бот запущен (в фоне)...")
+        log_info("Admin started bot.")
 
     def update_status(self, msg: str) -> None:
-        self.status_label.setText(f"Статус: {msg}")
+        self.status_label.setText("Статус: " + msg)
 
+
+# ────────────────────────────────────────────────
 # BotThread
+# ────────────────────────────────────────────────
+
 class BotThread(QThread):
     status_updated = pyqtSignal(str)
 
@@ -325,20 +461,27 @@ class BotThread(QThread):
         self.token = token
 
     def run(self) -> None:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
         try:
-            self.status_updated.emit("Запуск бота...")
-            asyncio.run(start_bot(self.token, self.status_updated))
+            loop.run_until_complete(start_bot(self.token, self.status_updated))
         except Exception as e:
             log_error(f"BotThread error: {e}")
             self.status_updated.emit(f"Ошибка: {str(e)}")
 
+
+# ────────────────────────────────────────────────
 # Telegram Bot logic
+# ────────────────────────────────────────────────
+
 async def start_bot(token: str, status_signal: pyqtSignal) -> None:
     bot = Bot(token=token)
     storage = MemoryStorage()
     dp = Dispatcher(storage=storage)
 
-    # Main menu keyboard
+    status_signal.emit("Бот: polling...")
+
+    # Клавиатуры
     def get_main_menu(current_name: str = "") -> ReplyKeyboardMarkup:
         kb = [
             [KeyboardButton(text=f"🦊 {current_name or 'Мои семьи'}"), KeyboardButton(text="➕ Создать семью")],
@@ -346,6 +489,15 @@ async def start_bot(token: str, status_signal: pyqtSignal) -> None:
             [KeyboardButton(text="⚙️ Настройки семьи"), KeyboardButton(text="❓ Помощь")],
         ]
         return ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True, input_field_placeholder="Выберите действие…")
+
+    def get_process_kb():
+        return ReplyKeyboardMarkup(
+            keyboard=[
+                [KeyboardButton(text="⬅️ Назад")],
+                [KeyboardButton(text="❌ Отмена")],
+            ],
+            resize_keyboard=True,
+        )
 
     # /start
     @dp.message(Command("start"))
@@ -410,7 +562,6 @@ async def start_bot(token: str, status_signal: pyqtSignal) -> None:
             "active_key": key_data,
             "tasks": {},
             "completed_tasks": {},
-            "subscription": None,  # Для подписки
         }
         db["users"].setdefault(uid, {"families": [], "current_family": ""})
         db["users"][uid]["families"].append(fam_id)
@@ -422,7 +573,8 @@ async def start_bot(token: str, status_signal: pyqtSignal) -> None:
             f"Ключ (10 мин): <code>{key_data['value']}</code>\n"
             "Поделитесь с семьей!"
         )
-        await message.answer(text, parse_mode=ParseMode.HTML, reply_markup=get_main_menu(db["families"][fam_id]["name"]))
+        await message.answer(text, parse_mode=ParseMode.HTML,
+                             reply_markup=get_main_menu(db["families"][fam_id]["name"]))
 
     # Присоединиться
     @dp.message(F.text == "🔑 Присоединиться")
@@ -530,7 +682,7 @@ async def start_bot(token: str, status_signal: pyqtSignal) -> None:
         task_type = cq.data.split(":")[1]
         await state.update_data(task_type=task_type)
         await state.set_state(FamilyStates.create_task_desc)
-        await cq.message.answer("Опишите задачу:")
+        await cq.message.answer("Опишите задачу:", reply_markup=get_process_kb())
         await cq.answer()
 
     @dp.message(FamilyStates.create_task_desc)
@@ -540,55 +692,78 @@ async def start_bot(token: str, status_signal: pyqtSignal) -> None:
             await message.answer("Описание не может быть пустым. Попробуйте снова.")
             return
         await state.update_data(desc=desc)
-        await state.set_state(FamilyStates.create_task_deadline_date)
         current_time = datetime.fromtimestamp(time.time()).strftime("%d.%m.%Y %H:%M")
-        await message.answer(f"Текущее время сервера: {current_time} (UTC+0).\nКакое у вас время? Укажите дату для дедлайна (ДД.ММ.ГГГГ, например 31.01.2026):")
+        text = (
+            f"Текущее время сервера: {current_time} (UTC+0).\n"
+            "Какое у вас время? Укажите дату (ДД.ММ.ГГГГ, например 31.01.2026):"
+        )
+        await message.answer(text, reply_markup=get_process_kb())
+        await state.set_state(FamilyStates.create_task_date)
 
-    @dp.message(FamilyStates.create_task_deadline_date)
-    async def task_deadline_date_handler(message: Message, state: FSMContext) -> None:
+    @dp.message(FamilyStates.create_task_date)
+    async def task_date_handler(message: Message, state: FSMContext) -> None:
+        if message.text in ("⬅️ Назад", "❌ Отмена"):
+            if message.text == "❌ Отмена":
+                await state.clear()
+                await message.answer("Отмена. Вернулись в меню.", reply_markup=get_main_menu())
+            else:
+                await state.set_state(FamilyStates.create_task_desc)
+                await message.answer("Вернулись к описанию задачи. Напишите заново.")
+            return
+
         date_str = message.text.strip()
         try:
             dt = datetime.strptime(date_str, "%d.%m.%Y")
-            if dt.year < 2026 or dt < datetime.now():  # Защита от прошлого
-                raise ValueError
+            if dt < datetime.now() - timedelta(hours=1):
+                await message.answer("Дата уже прошла или слишком близко. Выберите будущую дату.")
+                return
             await state.update_data(deadline_date=date_str)
-            await state.set_state(FamilyStates.create_task_deadline_time)
-            await message.answer("Укажите время (ЧЧ:ММ, например 16:20):")
         except ValueError:
-            await message.answer("Неверный формат даты или дата недействительна (например, 31.02.2026 не существует). Попробуйте снова.")
+            await message.answer("Неверный формат. Пример: 05.02.2026\nПопробуйте снова.")
+            return
 
-    @dp.message(FamilyStates.create_task_deadline_time)
-    async def task_deadline_time_handler(message: Message, state: FSMContext) -> None:
+        await state.set_state(FamilyStates.create_task_time)
+        await message.answer("Теперь укажите время (ЧЧ:ММ)\nПример: 18:30")
+
+    @dp.message(FamilyStates.create_task_time)
+    async def task_time_handler(message: Message, state: FSMContext) -> None:
         time_str = message.text.strip()
         try:
             datetime.strptime(time_str, "%H:%M")
             data = await state.get_data()
-            deadline = f"{data['deadline_date']} {time_str}"
-            dt = datetime.strptime(deadline, "%d.%m.%Y %H:%M")
+            full = f"{data['deadline_date']} {time_str}"
+            dt = datetime.strptime(full, "%d.%m.%Y %H:%M")
             if dt < datetime.now():
-                raise ValueError("Дедлайн в прошлом")
-            await state.update_data(deadline=deadline)
+                await message.answer("Это время уже прошло. Выберите будущее.")
+                return
+            await state.update_data(deadline=full)
+
+            kb = InlineKeyboardBuilder()
+            kb.button(text="Да", callback_data="time_confirm:yes")
+            kb.button(text="Нет", callback_data="time_confirm:no")
+            kb.adjust(2)
+
+            await message.answer(
+                f"Нужно успеть {full}\n"
+                "Это время примерно совпадает с вашим? (сервер в UTC+0)",
+                reply_markup=kb.as_markup()
+            )
             await state.set_state(FamilyStates.create_task_time_confirm)
-            builder = InlineKeyboardBuilder()
-            builder.button(text="Да", callback_data="time_confirm:yes")
-            builder.button(text="Нет", callback_data="time_confirm:no")
-            builder.adjust(2)
-            await message.answer(f"У вас дедлайн {deadline}? (предполагая ваше время UTC+3, если нет — укажите заново после 'Нет')", reply_markup=builder.as_markup())
         except ValueError:
-            await message.answer("Неверный формат времени или дедлайн в прошлом. Попробуйте снова.")
+            await message.answer("Неверный формат времени. Пример: 14:45\nПопробуйте снова.")
 
     @dp.callback_query(F.data.startswith("time_confirm:"))
-    async def task_time_confirm(cq: CallbackQuery, state: FSMContext) -> None:
+    async def time_confirm(cq: CallbackQuery, state: FSMContext) -> None:
         confirm = cq.data.split(":")[1]
         if confirm == "yes":
             await state.set_state(FamilyStates.create_task_reminder)
-            builder = InlineKeyboardBuilder()
-            for option in REMINDER_OPTIONS:
-                builder.button(text=option, callback_data=f"reminder:{option}")
-            builder.adjust(2)
-            await cq.message.answer("Выберите напоминание:", reply_markup=builder.as_markup())
+            kb = InlineKeyboardBuilder()
+            for opt in REMINDER_OPTIONS:
+                kb.button(text=opt, callback_data=f"reminder:{opt}")
+            kb.adjust(2)
+            await cq.message.answer("Нужно ли напомнить заранее? Выберите:", reply_markup=kb.as_markup())
         else:
-            await state.set_state(FamilyStates.create_task_deadline_date)
+            await state.set_state(FamilyStates.create_task_date)
             await cq.message.answer("Укажите дату заново (ДД.ММ.ГГГГ):")
         await cq.answer()
 
@@ -637,15 +812,8 @@ async def start_bot(token: str, status_signal: pyqtSignal) -> None:
         atomic_save_json(db)
         text = f"Новая задача от {db['families'][fam_id]['members'][uid]['nick']}: {task['desc']}\nДедлайн: {task['deadline']}"
         await notify_family(message.bot, fam_id, text)
-        await message.answer("Задача создана!")
+        await message.answer("Задача создана!", reply_markup=get_main_menu())
         await state.clear()
-
-    # Прогресс задачи (пример)
-    @dp.callback_query(F.data == "progress:task_id")  # Заменить на реальный callback
-    async def task_progress_handler(cq: CallbackQuery, state: FSMContext) -> None:
-        # Реализация обновления прогресса, кнопки +10% и т.д.
-        # Для защиты: проверить, что user в семье, задача существует и т.д.
-        await cq.answer("Прогресс обновлён")
 
     # Настройки семьи
     @dp.message(F.text == "⚙️ Настройки семьи")
@@ -662,18 +830,6 @@ async def start_bot(token: str, status_signal: pyqtSignal) -> None:
         builder.button(text="Завершённые задачи", callback_data="completed_tasks")
         builder.adjust(1)
         await message.answer("Настройки семьи:", reply_markup=builder.as_markup())
-
-    @dp.callback_query(F.data == "new_key")
-    async def new_key(cq: CallbackQuery, state: FSMContext) -> None:
-        db = load_db()
-        uid = str(cq.from_user.id)
-        fam_id = db["users"][uid]["current_family"]
-        key_data = generate_family_key()
-        db["families"][fam_id]["active_key"] = key_data
-        atomic_save_json(db)
-        text = f"Новый ключ: <code>{key_data['value']}</code> (10 мин)"
-        await cq.message.answer(text, parse_mode=ParseMode.HTML)
-        await cq.answer()
 
     @dp.callback_query(F.data == "change_name")
     async def change_name(cq: CallbackQuery, state: FSMContext) -> None:
@@ -726,9 +882,9 @@ async def start_bot(token: str, status_signal: pyqtSignal) -> None:
         text = "Помощь по боту:\n- Создайте семью\n- Присоединяйтесь по ключу\n- Создавайте задачи с прогрессом\n- Уведомления и напоминания\nДля подписки — кнопка в настройках."
         await message.answer(text)
 
-    # Запуск reminders и polling
     asyncio.create_task(reminders_loop(bot))
     await dp.start_polling(bot)
+
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
