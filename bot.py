@@ -7,6 +7,7 @@ aiogram 3.22.0 + PyQt6 6.10.0
 import asyncio
 import json
 import logging
+import os
 import secrets
 import sys
 import time
@@ -363,15 +364,21 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("🦊 FoxFamilyTask Bot — Настройка (2026)")
         self.resize(800, 600)
-        self.db = load_db()
 
-        # ← ДОБАВИТЬ ЭТИ СТРОКИ ПОСЛЕ ЗАГРУЗКИ БД:
+        # ← УСТАНАВЛИВАЕМ РАБОЧУЮ ДИРЕКТОРИЮ ДО ЗАГРУЗКИ БД
         self.settings = QSettings("FoxFamilyTask", "Bot")
-        saved_data = self.settings.value("data_folder", self.db.get("data_folder", str(Path.cwd())))
+        saved_data = self.settings.value("data_folder")
+        if saved_data and Path(saved_data).exists():
+            os.chdir(saved_data)  # ← КЛЮЧЕВАЯ СТРОКА: меняем рабочую директорию
+
+        self.db = load_db()
+        # Обновляем пути в БД
+        if not saved_data:
+            saved_data = self.db.get("data_folder", str(Path.cwd()))
         saved_output = self.settings.value("output_base", self.db.get("output_base", str(Path.cwd() / "output")))
         self.db["data_folder"] = saved_data
         self.db["output_base"] = saved_output
-        atomic_save_db(self.db)  # Сохраняем обновлённые пути в БД
+        atomic_save_db(self.db)
 
         # Центральный виджет со стеком
         self.stacked = QStackedWidget()
@@ -548,38 +555,26 @@ class MainWindow(QMainWindow):
     def save_paths(self) -> None:
         data_path = Path(self.data_edit.text().strip())
         output_path = Path(self.output_edit.text().strip())
-
         if not data_path.exists():
             try:
                 data_path.mkdir(parents=True, exist_ok=True)
             except Exception as e:
                 QMessageBox.critical(self, "Ошибка", f"Не удалось создать папку данных: {e}")
                 return
-
         if not output_path.exists():
             try:
                 output_path.mkdir(parents=True, exist_ok=True)
             except Exception as e:
                 QMessageBox.warning(self, "Предупреждение", f"Не удалось создать папку вывода: {e}")
 
-        # ← ДОБАВИТЬ ЭТИ СТРОКИ ПЕРЕД СОХРАНЕНИЕМ В БД:
+        # Сохраняем пути в настройки и БД
         self.settings.setValue("data_folder", str(data_path))
         self.settings.setValue("output_base", str(output_path))
-
-        # Сохраняем пути в ОБЩУЮ БД окна
         self.db["data_folder"] = str(data_path)
         self.db["output_base"] = str(output_path)
+
         try:
             atomic_save_db(self.db)
-            self.stacked.setCurrentIndex(3)
-        except Exception as e:
-            QMessageBox.critical(self, "Ошибка", f"Не удалось сохранить настройки: {e}")
-
-        # Сохраняем пути в ОБЩУЮ БД окна (а не загружаем новую!)
-        self.db["data_folder"] = str(data_path)
-        self.db["output_base"] = str(output_path)
-        try:
-            atomic_save_db(self.db)  # ← ИСПОЛЬЗУЕМ self.db, а не load_db()
             self.stacked.setCurrentIndex(3)
         except Exception as e:
             QMessageBox.critical(self, "Ошибка", f"Не удалось сохранить настройки: {e}")
