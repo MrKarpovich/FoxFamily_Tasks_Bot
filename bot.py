@@ -8,6 +8,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import secrets
 import sys
 import time
@@ -54,6 +55,32 @@ load_dotenv()  # Загружаем .env для токена
 LOG_FILE = "foxfamily.log"
 DB_PATH = Path("foxfamily_db.json")
 ENV_PATH = Path(".env")
+
+# ────────────────────────────────────────────────
+# Анимации и визуальные эффекты
+# ────────────────────────────────────────────────
+SPIN_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+
+
+async def show_loading(bot: Bot, chat_id: int, text: str, duration: float = 1.2) -> None:
+    """Показывает анимированный спиннер загрузки"""
+    msg = await bot.send_message(chat_id, f"{SPIN_FRAMES[0]} {text}")
+    start = time.time()
+    i = 0
+    while time.time() - start < duration:
+        i = (i + 1) % len(SPIN_FRAMES)
+        await msg.edit_text(f"{SPIN_FRAMES[i]} {text}")
+        await asyncio.sleep(0.08)
+    await msg.delete()
+
+
+def fancy_progress_bar(pct: int) -> str:
+    """Красивый прогресс-бар с градиентом эмодзи"""
+    filled = pct // 10
+    colors = ["🟢", "🟩", "🟨", "🟧", "🟠", "🟤", "🔴"]
+    bar = "".join(colors[min(i // 2, len(colors) - 1)] for i in range(filled))
+    bar += "⚪" * (10 - filled)
+    return f"{bar} {pct}%"
 
 
 # Безопасная загрузка токена из .env
@@ -128,12 +155,12 @@ class FamilyStates(StatesGroup):
     set_creator_nick = State()
     change_name = State()
     create_task_type = State()
+    create_task_shop_category = State()  # ← НОВОЕ: выбор категории покупок
+    create_task_shop_items = State()  # ← НОВОЕ: ввод списка с количеством
     create_task_desc = State()
-    create_task_deadline = State()  # Объединённый ввод даты+времени
+    create_task_deadline = State()
     create_task_reminder = State()
-    create_task_items = State()
     update_task_progress = State()
-    update_task_items = State()
     leave_family_confirm = State()
     change_nick = State()
 
@@ -1730,23 +1757,178 @@ async def start_bot(token: str, status_signal: pyqtSignal) -> None:
     @dp.callback_query(F.data.startswith("task_type:"))
     async def task_type_selected(cq: CallbackQuery, state: FSMContext) -> None:
         task_type = cq.data.split(":")[1]
+
+        # 🛒 СПЕЦИАЛЬНЫЙ ДИАЛОГ ДЛЯ ПОКУПОК
+        if task_type == "shopping":
+            builder = InlineKeyboardBuilder()
+            categories = [
+                ("🥛 Продукты питания", "food"),
+                ("🔧 Автозапчасти", "auto"),
+                ("🛠️ Хозтовары", "household"),
+                ("💊 Аптека", "pharmacy"),
+                ("👕 Одежда/обувь", "clothing"),
+                ("🎁 Другое", "other")
+            ]
+            for text, value in categories:
+                builder.button(text=text, callback_data=f"shop_cat:{value}")
+            builder.adjust(2)
+
+            await state.update_data(task_type="shopping")
+            await state.set_state(FamilyStates.create_task_shop_category)
+            await cq.message.answer(
+                "🛒 <b>Выберите категорию покупок:</b>",
+                parse_mode=ParseMode.HTML,
+                reply_markup=builder.as_markup()
+            )
+            await cq.answer()
+            return
+
+        # 📝 ОБЫЧНЫЕ ЗАДАЧИ
         display_type = next((k for k, v in TASK_TYPES.items() if v == task_type), "Обычная")
         await state.update_data(task_type=task_type, display_type=display_type)
         await state.set_state(FamilyStates.create_task_desc)
+
         examples = {
-            "regular": "Вынести мусор до вечера",
-            "shopping": "Купить молоко, хлеб, яйца",
-            "trip": "Съездить на дачу в выходные",
-            "cleaning": "Протереть пыль, помыть полы в ванной",
-            "event": "Подготовить торт к дню рождения"
+            "regular": "Вынести мусор до 19:00",
+            "trip": "Съездить на дачу в субботу",
+            "cleaning": "Помыть окна в гостиной",
+            "event": "Подготовить торт ко дню рождения"
         }
         example = examples.get(task_type, "Опишите задачу кратко")
+
         await cq.message.answer(
-            f"✏️ <b>{display_type}</b>\n{example}",
+            f"✏️ <b>{display_type}</b>\nПример: <i>{example}</i>",
             parse_mode=ParseMode.HTML,
             reply_markup=get_cancel_kb()
         )
         await cq.answer()
+
+    @dp.callback_query(F.data.startswith("shop_cat:"))
+    async def shop_category_selected(cq: CallbackQuery, state: FSMContext) -> None:
+        """Выбор категории покупок → переход к вводу списка"""
+        category = cq.data.split(":")[1]
+        category_names = {
+            "food": "Продукты питания",
+            "auto": "Автозапчасти",
+            "household": "Хозтовары",
+            "pharmacy": "Аптека",
+            "clothing": "Одежда/обувь",
+            "other": "Другое"
+        }
+
+        # Сохраняем категорию
+        await state.update_data(shop_category=category)
+
+        # Формируем подсказку в зависимости от категории
+        hints = {
+            "food": (
+                "🥛 <b>Продукты питания</b>\n"
+                "Введите список через новую строку:\n"
+                "<code>Молоко 2л — 2шт\nХлеб бородинский — 1бух\nЯйца — 10шт</code>"
+            ),
+            "auto": (
+                "🔧 <b>Автозапчасти</b>\n"
+                "Укажите модель авто и детали:\n"
+                "<code>ВАЗ-2114\nМасляный фильтр — 1шт\nСвечи зажигания — 4шт</code>"
+            ),
+            "household": (
+                "🛠️ <b>Хозтовары</b>\n"
+                "Введите список:\n"
+                "<code>Моющее средство — 1шт\nЛампочки LED — 3шт</code>"
+            ),
+            "pharmacy": (
+                "💊 <b>Аптека</b>\n"
+                "Введите лекарства:\n"
+                "<code>Парацетамол — 1уп\nВитамины Д3 — 1шт</code>"
+            ),
+            "clothing": (
+                "👕 <b>Одежда/обувь</b>\n"
+                "Введите позиции:\n"
+                "<code>Джинсы 32 — 1шт\nКроссовки 43 — 1пара</code>"
+            ),
+            "other": (
+                "🎁 <b>Другое</b>\n"
+                "Введите список покупок:\n"
+                "<code>Подарок на день рождения\nУпаковочная бумага</code>"
+            )
+        }
+
+        await state.set_state(FamilyStates.create_task_shop_items)
+        await cq.message.answer(
+            hints.get(category, "🛒 Введите список покупок (по одной на строку):"),
+            parse_mode=ParseMode.HTML,
+            reply_markup=get_cancel_kb()
+        )
+        await cq.answer()
+
+    @dp.message(FamilyStates.create_task_shop_items)
+    async def shop_items_handler(message: Message, state: FSMContext) -> None:
+        """Парсинг списка покупок с количеством"""
+        if message.text == "❌ Отмена":
+            await cmd_cancel(message, state)
+            return
+
+        # Парсим строки вида "молоко 2л — 2шт" или просто "молоко"
+        items_raw = message.text.strip().split("\n")
+        items = []
+        quantities = []
+
+        for line in items_raw:
+            line = line.strip()
+            if not line:
+                continue
+
+            # Пытаемся извлечь количество через разделитель
+            if "—" in line or "-" in line or "–" in line:
+                # Разделяем по первому вхождению разделителя
+                parts = re.split(r"[—\-–]", line, maxsplit=1)
+                name = parts[0].strip()
+                qty = parts[1].strip() if len(parts) > 1 else "1шт"
+                items.append(name)
+                quantities.append(qty)
+            else:
+                items.append(line)
+                quantities.append("1шт")
+
+        if not items:
+            await message.answer(
+                "❌ Список не может быть пустым. Введите хотя бы один товар:",
+                reply_markup=get_cancel_kb()
+            )
+            return
+
+        if len(items) > 50:
+            await message.answer(
+                "❌ Слишком много товаров (макс. 50). Сократите список:",
+                reply_markup=get_cancel_kb()
+            )
+            return
+
+        # Сохраняем данные
+        data = await state.get_data()
+        category = data.get("shop_category", "other")
+        category_names = {
+            "food": "Продукты", "auto": "Автозапчасти", "household": "Хозтовары",
+            "pharmacy": "Аптека", "clothing": "Одежда", "other": "Покупки"
+        }
+        desc = f"{category_names.get(category, 'Покупки')}: {len(items)} товаров"
+
+        await state.update_data(
+            desc=desc,
+            items=items,
+            quantities=quantities,
+            shop_category=category
+        )
+
+        # Переход к дедлайну
+        await state.set_state(FamilyStates.create_task_deadline)
+        await message.answer(
+            f"✅ <b>Товаров:</b> {len(items)}\n\n"
+            "⏰ <b>К какому сроку?</b>\n"
+            "<code>ДД.ММ.ГГГГ ЧЧ:ММ</code> или «без срока»",
+            parse_mode=ParseMode.HTML,
+            reply_markup=get_cancel_kb()
+        )
 
     @dp.message(FamilyStates.create_task_desc)
     async def task_desc_handler(message: Message, state: FSMContext) -> None:
@@ -1775,6 +1957,7 @@ async def start_bot(token: str, status_signal: pyqtSignal) -> None:
 
     @dp.message(FamilyStates.create_task_deadline)
     async def task_deadline_handler(message: Message, state: FSMContext) -> None:
+        """Обработчик дедлайна — с умной логикой напоминаний (без напоминаний при отсутствии дедлайна)"""
         if message.text == "❌ Отмена":
             await cmd_cancel(message, state)
             return
@@ -1782,14 +1965,16 @@ async def start_bot(token: str, status_signal: pyqtSignal) -> None:
         deadline_input = message.text.strip().lower()
         data = await state.get_data()
         task_type = data["task_type"]
+        has_deadline = True
 
-        if deadline_input in ["без срока", "нет", "без", "без дедлайна", "не нужно"]:
+        # Обработка "без срока"
+        if deadline_input in ["без срока", "нет", "без", "без дедлайна", "не нужно", "—", "0"]:
             await state.update_data(deadline=None)
+            has_deadline = False
         else:
             try:
                 # Поддержка форматов: "05.02.2026 18:30" и "05.02 18:30"
                 if len(deadline_input) == 16 and deadline_input[2] == '.' and deadline_input[5] == ' ':
-                    # Формат ДД.ММ ЧЧ:ММ — добавляем текущий год
                     today = datetime.now()
                     deadline_input = f"{deadline_input[:5]}.{today.year} {deadline_input[6:]}"
 
@@ -1803,22 +1988,23 @@ async def start_bot(token: str, status_signal: pyqtSignal) -> None:
                 await state.update_data(deadline=deadline_dt.strftime("%d.%m.%Y %H:%M"))
             except ValueError:
                 await message.answer(
-                    "❌ Неверный формат. Пример: <code>05.02.2026 18:30</code>\nПопробуйте снова:",
+                    "❌ Неверный формат даты.\n"
+                    "Примеры:\n"
+                    "• <code>05.02.2026 18:30</code>\n"
+                    "• <code>05.02 18:30</code> (текущий год)\n"
+                    "• <code>без срока</code>",
                     parse_mode=ParseMode.HTML,
                     reply_markup=get_cancel_kb()
                 )
                 return
 
-        # Для списка покупок сразу запрашиваем элементы
+        # 🛒 ПОКУПКИ: пропускаем напоминания ВСЕГДА
         if task_type == "shopping":
-            await state.set_state(FamilyStates.create_task_items)
-            await message.answer(
-                "🛒 Введите список покупок (по одной на строку):\n\n"
-                "Пример:\nМолоко\nХлеб\nЯйца",
-                reply_markup=get_cancel_kb()
-            )
-        else:
-            # Выбор напоминания
+            await create_task_finish(message, state, message.from_user.id)
+            return
+
+        # 🔔 ОБЫЧНЫЕ ЗАДАЧИ: напоминания ТОЛЬКО если есть дедлайн
+        if has_deadline:
             builder = InlineKeyboardBuilder()
             for display, seconds in REMINDER_OPTIONS.items():
                 builder.button(text=display, callback_data=f"reminder:{seconds}")
@@ -1826,41 +2012,129 @@ async def start_bot(token: str, status_signal: pyqtSignal) -> None:
 
             await state.set_state(FamilyStates.create_task_reminder)
             await message.answer(
-                "🔔 Нужно ли напомнить о задаче заранее?",
+                "🔔 <b>Нужно ли напомнить о задаче заранее?</b>\n"
+                "Напоминание придёт всем участникам семьи за указанный период до дедлайна.",
+                parse_mode=ParseMode.HTML,
                 reply_markup=builder.as_markup()
             )
+        else:
+            # Нет дедлайна → нет напоминаний → сразу завершаем
+            await state.update_data(reminder_sec=0)
+            await create_task_finish(message, state, message.from_user.id)
 
     @dp.callback_query(F.data.startswith("reminder:"))
     async def reminder_selected(cq: CallbackQuery, state: FSMContext) -> None:
         seconds = int(cq.data.split(":")[1])
         await state.update_data(reminder_sec=seconds)
-        await create_task_finish(cq.message, state, cq.from_user.id)
-        await cq.answer()
 
-    @dp.message(FamilyStates.create_task_items)
-    async def task_items_handler(message: Message, state: FSMContext) -> None:
+        # Визуальная обратная связь
+        if seconds == 0:
+            await cq.answer("✅ Напоминания отключены", show_alert=False)
+        else:
+            human_time = next(k for k, v in REMINDER_OPTIONS.items() if v == seconds)
+            await cq.answer(f"✅ {human_time}", show_alert=False)
+
+        await create_task_finish(cq.message, state, cq.from_user.id)
+
+    @dp.message(FamilyStates.create_task_desc)
+    async def task_desc_handler(message: Message, state: FSMContext) -> None:
+        """Умный обработчик описания — для покупок принимает описание + список в одном сообщении"""
         if message.text == "❌ Отмена":
             await cmd_cancel(message, state)
             return
 
-        items_raw = message.text.strip().split("\n")
-        items = [i.strip() for i in items_raw if i.strip()]
+        text_input = message.text.strip()
+        data = await state.get_data()
+        task_type = data["task_type"]
 
-        if not items:
-            await message.answer("❌ Список не может быть пустым. Введите хотя бы один элемент:",
-                                 reply_markup=get_cancel_kb())
+        # 🛒 РЕЖИМ ПОКУПОК: разделяем описание и список по ДВУМ новым строкам (\n\n)
+        if task_type == "shopping":
+            parts = text_input.split("\n\n", 1)  # ← КЛЮЧЕВОЙ РАЗДЕЛИТЕЛЬ
+
+            if len(parts) == 2:
+                # Есть и описание, и список — обрабатываем сразу
+                desc = parts[0].strip()[:200]
+                items_raw = parts[1].strip().split("\n")
+                items = [i.strip() for i in items_raw if i.strip()]
+
+                # Валидация
+                if not desc:
+                    await message.answer(
+                        "❌ Описание не может быть пустым.\n"
+                        "<b>Формат для покупок:</b>\n"
+                        "<code>Что купить?</code>\n\n"
+                        "<code>Молоко\nХлеб\nЯйца</code>",
+                        parse_mode=ParseMode.HTML,
+                        reply_markup=get_cancel_kb()
+                    )
+                    return
+
+                if not items:
+                    await message.answer(
+                        "❌ Список покупок пуст.\n"
+                        "Пример правильного ввода:\n"
+                        "<code>Продукты на неделю</code>\n\n"
+                        "<code>Молоко\nХлеб\nЯйца</code>",
+                        parse_mode=ParseMode.HTML,
+                        reply_markup=get_cancel_kb()
+                    )
+                    return
+
+                if len(items) > 50:
+                    await message.answer(
+                        "❌ Слишком много элементов (макс. 50).\nСократите список:",
+                        reply_markup=get_cancel_kb()
+                    )
+                    return
+
+                # Сохраняем и переходим к дедлайну
+                await state.update_data(desc=desc, items=items)
+                await state.set_state(FamilyStates.create_task_deadline)
+                await message.answer(
+                    f"✅ <b>Описание:</b> {desc}\n"
+                    f"✅ <b>Товаров:</b> {len(items)}\n\n"
+                    "⏰ <b>К какому сроку?</b>\n"
+                    "<code>ДД.ММ.ГГГГ ЧЧ:ММ</code> или «без срока»",
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=get_cancel_kb()
+                )
+                return
+
+        # 📝 ОБЫЧНЫЕ ЗАДАЧИ или НЕПОЛНЫЙ ВВОД ПОКУПОК
+        desc = text_input[:200]
+        if not desc or len(desc) < 1:
+            await message.answer(
+                "❌ Описание должно быть от 1 до 200 символов.\nПопробуйте снова:",
+                reply_markup=get_cancel_kb()
+            )
             return
 
-        if len(items) > 50:
-            await message.answer("❌ Слишком много элементов (макс. 50). Сократите список:",
-                                 reply_markup=get_cancel_kb())
+        await state.update_data(desc=desc)
+
+        # Для покупок без списка — запрашиваем отдельно
+        if task_type == "shopping":
+            await message.answer(
+                "🛒 <b>Теперь введите список покупок</b> (по одной на строку):\n"
+                "<code>Молоко\nХлеб\nЯйца</code>",
+                parse_mode=ParseMode.HTML,
+                reply_markup=get_cancel_kb()
+            )
+            # ← НЕ МЕНЯЕМ СОСТОЯНИЕ! Остаёмся в create_task_desc для повторного ввода
             return
 
-        await state.update_data(items=items)
-        # Для списка покупок напоминание не требуется — сразу завершаем
-        await create_task_finish(message, state, message.from_user.id)
+        # Для обычных задач — переходим к дедлайну
+        await state.set_state(FamilyStates.create_task_deadline)
+        await message.answer(
+            "⏰ <b>К какому сроку выполнить задачу?</b>\n"
+            "<b>Формат:</b> <code>ДД.ММ.ГГГГ ЧЧ:ММ</code>\n"
+            "Пример: <code>05.02.2026 18:30</code>\n"
+            "Или напишите «без срока»",
+            parse_mode=ParseMode.HTML,
+            reply_markup=get_cancel_kb()
+        )
 
     async def create_task_finish(message: Message, state: FSMContext, user_id: int) -> None:
+        """Создание задачи с анимацией сохранения"""
         data = await state.get_data()
         db = load_db()
         uid = str(user_id)
@@ -1875,6 +2149,10 @@ async def start_bot(token: str, status_signal: pyqtSignal) -> None:
         task_id = str(uuid.uuid4())
         nick = fam["members"].get(uid, {}).get("nick", "Участник")
 
+        # Анимация сохранения
+        await show_loading(message.bot, message.chat.id, "Сохраняю задачу...")
+
+        # Создаём задачу
         task = {
             "creator_id": uid,
             "creator_nick": nick,
@@ -1887,7 +2165,9 @@ async def start_bot(token: str, status_signal: pyqtSignal) -> None:
             "assignees": [nick],
             "updates": [],
             "items": data.get("items", []),
+            "quantities": data.get("quantities", []),
             "items_checked": [False] * len(data.get("items", [])),
+            "shop_category": data.get("shop_category"),
             "created_at": time.time(),
             "reminder_sent": False,
         }
@@ -1897,25 +2177,31 @@ async def start_bot(token: str, status_signal: pyqtSignal) -> None:
 
         # Формируем уведомление
         deadline_str = format_deadline(task["deadline"]) if task.get("deadline") else "⏱️ Без дедлайна"
-        reminder_str = f"\n🔔 Напоминание: за {list(REMINDER_OPTIONS.keys())[list(REMINDER_OPTIONS.values()).index(task['reminder_sec'])]}" if \
-            task["reminder_sec"] > 0 else ""
+        reminder_str = ""
+        if task["reminder_sec"] > 0 and task.get("deadline"):
+            human_time = next(k for k, v in REMINDER_OPTIONS.items() if v == task["reminder_sec"])
+            reminder_str = f"\n🔔 Напоминание: {human_time}"
 
         notification = (
-            f"🆕 <b>Новая задача в семье «{fam['name']}»</b>\n\n"
+            f"✨ <b>Новая задача</b> в семье «{fam['name']}»\n"
             f"«{task['desc']}» ({task['display_type']})\n"
             f"{deadline_str}{reminder_str}\n"
-            f"Исполнитель: {nick}"
+            f"👤 Исполнитель: {nick}"
         )
 
         await notify_family(message.bot, fam_id, notification)
+
+        # Красивое завершение
         await message.answer(
-            "✅ Задача создана!",
+            "✅ <b>Задача создана!</b>",
+            parse_mode=ParseMode.HTML,
             reply_markup=get_family_menu_kb(fam["name"])
         )
         await state.clear()
 
     @dp.callback_query(F.data.startswith("task:edit:"))
-    async def edit_task(cq: CallbackQuery, state: FSMContext) -> None:
+    async def edit_task(cq: CallbackQuery) -> None:
+        """Улучшенное меню задачи с быстрыми действиями"""
         task_id = cq.data.split(":")[2]
         db = load_db()
         uid = str(cq.from_user.id)
@@ -1927,31 +2213,140 @@ async def start_bot(token: str, status_signal: pyqtSignal) -> None:
 
         fam = db["families"][fam_id]
         task = fam.get("tasks", {}).get(task_id)
+
         if not task:
             await cq.answer("❌ Задача не найдена!", show_alert=True)
             return
 
-        # Меню действий с задачей
-        builder = InlineKeyboardBuilder()
-        builder.button(text="📈 Обновить прогресс", callback_data=f"task:progress:{task_id}")
-        if task["type"] == "shopping":
-            builder.button(text="🛒 Список покупок", callback_data=f"task:items:{task_id}")
-        builder.button(text="✅ Завершить задачу", callback_data=f"task:complete:{task_id}")
-        builder.button(text="⬅️ Назад к задачам", callback_data="tasks:list")
-        builder.adjust(1)
-
+        # 📊 Формируем красивое отображение
         deadline_str = format_deadline(task["deadline"]) if task.get("deadline") else "⏱️ Без дедлайна"
         bar = progress_bar(task["progress"])
+        creator = task.get("creator_nick", "Участник")
+
+        text = (
+            f"📝 <b>{task['desc']}</b>\n"
+            f"<i>({task['display_type']})</i>\n\n"
+            f"{'─' * 30}\n"
+            f"📊 Прогресс: {bar}\n"
+            f"⏰ {deadline_str}\n"
+            f"👤 Создал: {creator}\n"
+        )
+
+        if task.get("assignees"):
+            text += f"👥 Исполнители: {', '.join(task['assignees'])}\n"
+
+        if task.get("updates"):
+            last_update = task["updates"][-1]
+            when = datetime.fromtimestamp(last_update["timestamp"]).strftime("%H:%M")
+            text += f"📝 Последнее обновление: {when}\n"
+
+        text += f"{'─' * 30}\n\n"
+
+        # 🎛️ Умное меню действий
+        builder = InlineKeyboardBuilder()
+
+        # 📈 Быстрые кнопки прогресса (только для не-покупок)
+        if task["type"] != "shopping":
+            if task["progress"] < 100:
+                quick_pct = min(100, task["progress"] + 25)
+                builder.button(
+                    text=f"⏩ +25% ({quick_pct}%)",
+                    callback_data=f"task:quickpct:{task_id}:{quick_pct}"
+                )
+
+        # 🛒 Список покупок
+        if task["type"] == "shopping":
+            builder.button(text="🛒 Показать список", callback_data=f"task:items:{task_id}")
+
+        # 📈 Ручное обновление прогресса
+        builder.button(text="✏️ Изменить прогресс", callback_data=f"task:progress:{task_id}")
+
+        # ✅ Завершить
+        if task["progress"] < 100:
+            builder.button(text="✅ Завершить задачу", callback_data=f"task:complete:{task_id}")
+
+        # 🔙 Назад
+        builder.button(text="⬅️ К списку задач", callback_data="tasks:list")
+
+        builder.adjust(1)
 
         await cq.message.edit_text(
-            f"📝 <b>{task['desc']}</b> ({task['display_type']})\n\n"
-            f"Прогресс: {bar}\n"
-            f"Дедлайн: {deadline_str}\n"
-            f"Исполнители: {', '.join(task['assignees'])}",
+            text,
             parse_mode=ParseMode.HTML,
             reply_markup=builder.as_markup()
         )
         await cq.answer()
+
+    @dp.callback_query(F.data.startswith("task:quickpct:"))
+    async def quick_progress(cq: CallbackQuery) -> None:
+        """Быстрое обновление прогресса +25%"""
+        _, _, task_id, pct_str = cq.data.split(":")
+        new_pct = int(pct_str)
+
+        db = load_db()
+        uid = str(cq.from_user.id)
+        fam_id = db["users"].get(uid, {}).get("current_family")
+
+        if not fam_id or fam_id not in db["families"]:
+            await cq.answer("❌ Ошибка доступа!", show_alert=True)
+            return
+
+        fam = db["families"][fam_id]
+        task = fam.get("tasks", {}).get(task_id)
+        nick = fam["members"][uid]["nick"]
+
+        if not task:
+            await cq.answer("❌ Задача не найдена!", show_alert=True)
+            return
+
+        old_pct = task.get("progress", 0)
+        task["progress"] = new_pct
+        task["updates"].append({
+            "user": nick,
+            "from": old_pct,
+            "to": new_pct,
+            "timestamp": time.time()
+        })
+
+        # Автозавершение при 100%
+        if new_pct == 100:
+            task["completed_at"] = time.time()
+            task["completed_by"] = nick
+            fam.setdefault("completed_tasks", {})[task_id] = task
+            fam["tasks"].pop(task_id, None)
+            atomic_save_db(db)
+
+            await notify_family(
+                cq.message.bot,
+                fam_id,
+                f"✅ Задача «{task['desc']}» завершена участником {nick}!"
+            )
+
+            builder = InlineKeyboardBuilder()
+            builder.button(text="📋 К задачам", callback_data="tasks:list")
+
+            await cq.message.edit_text(
+                f"🎉 <b>Задача завершена!</b>\n"
+                f"«{task['desc']}»\n\n"
+                f"✅ Прогресс: {progress_bar(100)}",
+                parse_mode=ParseMode.HTML,
+                reply_markup=builder.as_markup()
+            )
+            await cq.answer(f"✅ Задача завершена!", show_alert=True)
+            return
+
+        atomic_save_db(db)
+
+        await notify_family(
+            cq.message.bot,
+            fam_id,
+            f"📈 {nick} обновил прогресс: {old_pct}% → {new_pct}%\n"
+            f"«{task['desc']}»"
+        )
+
+        # 🔄 Обновляем меню задачи
+        await edit_task(cq)
+        await cq.answer(f"✅ Прогресс: {new_pct}%", show_alert=False)
 
     @dp.callback_query(F.data.startswith("task:progress:"))
     async def update_progress_start(cq: CallbackQuery, state: FSMContext) -> None:
@@ -2040,6 +2435,7 @@ async def start_bot(token: str, status_signal: pyqtSignal) -> None:
 
     @dp.callback_query(F.data.startswith("task:items:"))
     async def show_shopping_list(cq: CallbackQuery) -> None:
+        """Улучшенный список покупок с количеством и красивым оформлением"""
         task_id = cq.data.split(":")[2]
         db = load_db()
         uid = str(cq.from_user.id)
@@ -2055,15 +2451,26 @@ async def start_bot(token: str, status_signal: pyqtSignal) -> None:
             await cq.answer("❌ Неверная задача!", show_alert=True)
             return
 
-        # Формируем список покупок с чекбоксами
-        items_text = "🛒 <b>Список покупок:</b>\n\n"
-        builder = InlineKeyboardBuilder()
+        # Формируем красивый список с количеством
+        items_text = f"🛒 <b>{task['desc']}</b>\n"
+        items_text += f"{'─' * 30}\n"
 
-        for idx, (item, checked) in enumerate(zip(task["items"], task["items_checked"])):
+        builder = InlineKeyboardBuilder()
+        quantities = task.get("quantities", ["1шт"] * len(task["items"]))
+
+        for idx, (item, checked, qty) in enumerate(zip(task["items"], task["items_checked"], quantities)):
             mark = "✅" if checked else "🔲"
-            items_text += f"{mark} {item}\n"
+            qty_display = f" <code>{qty}</code>" if qty != "1шт" else ""
+            items_text += f"{mark} {item}{qty_display}\n"
+
             if not checked:
-                builder.button(text=f"✓ {item}", callback_data=f"item:check:{task_id}:{idx}")
+                builder.button(
+                    text=f"✓ {item[:20]}",
+                    callback_data=f"item:check:{task_id}:{idx}"
+                )
+
+        items_text += f"{'─' * 30}\n"
+        items_text += f"📦 Осталось купить: {sum(not c for c in task['items_checked'])} из {len(task['items'])}"
 
         builder.adjust(1)
         builder.row(InlineKeyboardButton(text="⬅️ Назад к задаче", callback_data=f"task:edit:{task_id}"))
@@ -2076,14 +2483,14 @@ async def start_bot(token: str, status_signal: pyqtSignal) -> None:
         await cq.answer()
 
     @dp.callback_query(F.data.startswith("item:check:"))
-    async def check_item(cq: CallbackQuery, state: FSMContext) -> None:
+    async def check_item(cq: CallbackQuery) -> None:
+        """Отметить товар как купленный — с сохранением контекста"""
         parts = cq.data.split(":")
         task_id, item_idx = parts[2], int(parts[3])
 
         db = load_db()
         uid = str(cq.from_user.id)
         fam_id = db["users"].get(uid, {}).get("current_family")
-        nick = db["families"][fam_id]["members"][uid]["nick"]
 
         if not fam_id or fam_id not in db["families"]:
             await cq.answer("❌ Ошибка доступа!", show_alert=True)
@@ -2091,19 +2498,28 @@ async def start_bot(token: str, status_signal: pyqtSignal) -> None:
 
         fam = db["families"][fam_id]
         task = fam.get("tasks", {}).get(task_id)
+        nick = fam["members"][uid]["nick"]
+
         if not task or task["type"] != "shopping":
             await cq.answer("❌ Ошибка задачи!", show_alert=True)
             return
 
-        # Отмечаем элемент как купленный
+        # Отмечаем элемент
         if not task["items_checked"][item_idx]:
+            item_name = task["items"][item_idx]
             task["items_checked"][item_idx] = True
-            atomic_save_db(db)
+            task["updates"].append({
+                "user": nick,
+                "action": "checked",
+                "item": item_name,
+                "timestamp": time.time()
+            })
 
-            # Проверяем завершённость списка
+            # Проверяем завершённость
             if all(task["items_checked"]):
                 task["progress"] = 100
                 task["completed_at"] = time.time()
+                task["completed_by"] = nick
                 fam.setdefault("completed_tasks", {})[task_id] = task
                 fam["tasks"].pop(task_id, None)
                 atomic_save_db(db)
@@ -2113,18 +2529,44 @@ async def start_bot(token: str, status_signal: pyqtSignal) -> None:
                     fam_id,
                     f"✅ Список покупок «{task['desc']}» полностью выполнен {nick}!"
                 )
+
+                builder = InlineKeyboardBuilder()
+                builder.button(text="📋 К списку задач", callback_data="tasks:list")
+                builder.button(text="🏡 В меню семьи", callback_data=f"enter_family:{fam_id}")
+
                 await cq.message.edit_text(
-                    f"🎉 Список покупок завершён!\n«{task['desc']}»",
-                    reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                        [InlineKeyboardButton(text="⬅️ К задачам", callback_data="tasks:list")]
-                    ])
+                    f"🎉 <b>Список покупок завершён!</b>\n"
+                    f"«{task['desc']}»\n\n"
+                    f"✅ Куплено: {len(task['items'])} товаров",
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=builder.as_markup()
                 )
-            else:
-                await cq.message.edit_reply_markup(reply_markup=None)
-                await show_shopping_list(cq, state)
-                await cq.answer(f"✅ {task['items'][item_idx]} куплено!")
+                await cq.answer(f"✅ {item_name} — куплено!", show_alert=True)
+                return
+
+            atomic_save_db(db)
+
+            # 🔄 Обновляем только клавиатуру (сохраняем контекст!)
+            items_text = "🛒 <b>Список покупок:</b>\n"
+            builder = InlineKeyboardBuilder()
+
+            for idx, (item, checked) in enumerate(zip(task["items"], task["items_checked"])):
+                mark = "✅" if checked else "🔲"
+                items_text += f"{mark} {item}\n"
+                if not checked:
+                    builder.button(text=f"✓ {item}", callback_data=f"item:check:{task_id}:{idx}")
+
+            builder.adjust(1)
+            builder.row(InlineKeyboardButton(text="⬅️ Назад к задаче", callback_data=f"task:edit:{task_id}"))
+
+            await cq.message.edit_text(
+                items_text,
+                parse_mode=ParseMode.HTML,
+                reply_markup=builder.as_markup()
+            )
+            await cq.answer(f"✅ {item_name} — куплено!", show_alert=False)
         else:
-            await cq.answer("❌ Уже куплено!", show_alert=True)
+            await cq.answer("ℹ️ Уже куплено!", show_alert=False)
 
     @dp.callback_query(F.data.startswith("task:complete:"))
     async def complete_task(cq: CallbackQuery) -> None:
@@ -2202,13 +2644,76 @@ async def start_bot(token: str, status_signal: pyqtSignal) -> None:
         await cq.answer()
 
     @dp.callback_query(F.data == "tasks:list")
-    async def back_to_tasks(cq: CallbackQuery, state: FSMContext) -> None:
+    async def back_to_tasks(cq: CallbackQuery) -> None:
+        """Возврат к списку задач БЕЗ зависимости от состояния"""
         db = load_db()
         uid = str(cq.from_user.id)
         fam_id = db["users"].get(uid, {}).get("current_family")
-        fam = db["families"].get(fam_id, {})
 
-        await tasks_list(cq.message, state)
+        if not fam_id or fam_id not in db["families"]:
+            await cq.message.edit_text(
+                "❌ <b>Ошибка доступа</b>\n"
+                "Вы не состоите ни в одной семье.\n"
+                "→ Создайте семью или присоединитесь по ключу",
+                parse_mode=ParseMode.HTML,
+                reply_markup=get_main_menu_kb()
+            )
+            await cq.answer()
+            return
+
+        fam = db["families"][fam_id]
+
+        # Ручной вызов списка задач (без FSM)
+        tasks = fam.get("tasks", {})
+        completed = fam.get("completed_tasks", {})
+
+        if not tasks and not completed:
+            await cq.message.edit_text(
+                "📭 <b>Список задач пуст</b>\n"
+                "✨ Начните с создания первой задачи!\n"
+                "→ Нажмите «➕ Новая задача» в меню семьи",
+                parse_mode=ParseMode.HTML,
+                reply_markup=get_family_menu_kb(fam["name"])
+            )
+            await cq.answer()
+            return
+
+        # Сортировка по дедлайну
+        sorted_tasks = sorted(
+            tasks.items(),
+            key=lambda x: datetime.strptime(x[1]["deadline"], "%d.%m.%Y %H:%M").timestamp()
+            if x[1].get("deadline") else float('inf')
+        )
+
+        text = "📋 <b>Активные задачи семьи</b>\n"
+        builder = InlineKeyboardBuilder()
+
+        for idx, (task_id, task) in enumerate(sorted_tasks, 1):
+            deadline_str = format_deadline(task["deadline"]) if task.get("deadline") else "⏱️ Без дедлайна"
+            bar = progress_bar(task.get("progress", 0))
+            assignees = ", ".join(task.get("assignees", [])) or "не назначена"
+
+            task_type_emoji = {
+                "shopping": "🛒", "trip": "🚗", "cleaning": "🧹",
+                "event": "🎂", "regular": "📝"
+            }.get(task["type"], "📝")
+
+            text += (
+                f"{task_type_emoji} <b>{idx}. {task['desc']}</b>\n"
+                f"   {bar} | {deadline_str}\n"
+                f"   👥 Исполнители: {assignees}\n"
+            )
+            builder.button(text=f"{idx}. {task['desc'][:25]}...", callback_data=f"task:edit:{task_id}")
+
+        builder.adjust(1)
+        builder.row(InlineKeyboardButton(text="✅ Завершённые задачи", callback_data="tasks:completed"))
+        builder.row(InlineKeyboardButton(text="➕ Создать задачу", callback_data="tasks:new"))
+
+        await cq.message.edit_text(
+            text,
+            parse_mode=ParseMode.HTML,
+            reply_markup=builder.as_markup()
+        )
         await cq.answer()
 
     @dp.message(F.text == "🏠 Вернуться в главное меню")
